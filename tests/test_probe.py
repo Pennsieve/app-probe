@@ -2,6 +2,7 @@
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -95,6 +96,38 @@ class ProbeTest(unittest.TestCase):
         self.assertEqual(r["memory"]["effectiveMiB"], 1024)
         self.assertEqual(r["memory"]["limitedBy"], "task limit")
         self.assertEqual(probe.smallest({"a": None, "b": None}), (None, None))
+
+    def test_lambda_resources_are_not_the_hosts(self):
+        sys.path.insert(0, ROOT)
+        try:
+            import probe
+        finally:
+            sys.path.remove(ROOT)
+        os.environ.pop("AWS_LAMBDA_FUNCTION_MEMORY_SIZE", None)
+        r = probe.resources(None, "lambda")
+        self.assertIsNone(r["cpu"]["effectiveVcpu"])
+        self.assertIsNone(r["memory"]["effectiveMiB"])
+        self.assertIn("unknown", probe.memory_line(r["memory"]))
+        os.environ["AWS_LAMBDA_FUNCTION_MEMORY_SIZE"] = "3538"
+        try:
+            r = probe.resources(None, "lambda")
+        finally:
+            del os.environ["AWS_LAMBDA_FUNCTION_MEMORY_SIZE"]
+        self.assertEqual(r["memory"]["effectiveMiB"], 3538)
+        self.assertEqual(r["cpu"]["effectiveVcpu"], 2.0)
+
+    def test_lambda_report_says_limits_are_unknown(self):
+        # The Lambda step runtime puts INPUT_DIR under /tmp, which is how the probe detects it.
+        base = tempfile.mkdtemp(dir="/tmp")
+        inputs = os.path.join(base, "input")
+        shutil.copytree(FIXTURES, inputs)
+        proc, out = run_probe({"INPUT_DIR": inputs})
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        with open(os.path.join(out, "report.md")) as f:
+            markdown = f.read()
+        self.assertIn("Compute: **lambda**", markdown)
+        self.assertIn("- CPU: **unknown** (not visible on Lambda", markdown)
+        self.assertIn("- Memory: **unknown** (not visible on Lambda", markdown)
 
     def test_bad_parameters_fall_back_to_defaults(self):
         proc, _ = run_probe({"MODE": "bogus", "EXIT_CODE": "not-a-number"})

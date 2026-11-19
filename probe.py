@@ -257,9 +257,32 @@ def smallest(candidates: dict) -> tuple:
     return known[name], name
 
 
-def resources(ecs: dict | None) -> dict:
+LAMBDA_NOT_VISIBLE = "not visible on Lambda: set by the function's memory size, which the step runtime doesn't pass to the app"
+# Lambda allocates CPU in proportion to memory: one vCPU's worth at 1769 MB, up to 6.
+LAMBDA_MB_PER_VCPU = 1769
+
+
+def lambda_resources() -> dict:
+    """On Lambda the sandbox's MemTotal and core count are not the function's limits, and
+    no cgroup shows them. The memory size is known only if AWS_LAMBDA_FUNCTION_MEMORY_SIZE
+    reaches the app (the step runtime normally strips it)."""
+    size = os.environ.get("AWS_LAMBDA_FUNCTION_MEMORY_SIZE")
+    memory_mb = int(size) if size and size.isdigit() else None
+    cpu = {"visibleCores": os.cpu_count(), "effectiveVcpu": None, "limitedBy": LAMBDA_NOT_VISIBLE}
+    memory = {"hostTotalMiB": mem_total_mib(), "functionMemoryMB": memory_mb,
+              "effectiveMiB": None, "limitedBy": LAMBDA_NOT_VISIBLE}
+    if memory_mb:
+        cpu["effectiveVcpu"] = round(min(6, memory_mb / LAMBDA_MB_PER_VCPU), 2)
+        cpu["limitedBy"] = "Lambda's share for the function's memory size"
+        memory["effectiveMiB"], memory["limitedBy"] = memory_mb, "function memory size"
+    return {"cpu": cpu, "memory": memory}
+
+
+def resources(ecs: dict | None, compute: str = "") -> dict:
     """CPU and memory as the step actually gets them. The host's figures (cores visible,
     MemTotal) describe the VM, not the step, so the effective value is the smallest limit."""
+    if compute == "lambda":
+        return lambda_resources()
     cgroup = cgroup_limits()
     ecs = ecs or {}
     task = ecs.get("taskLimits") or {}
@@ -344,13 +367,14 @@ def system(ecs: dict | None) -> dict:
     uname = platform.uname()
     gpu = gpu_info()
     tmpdir = tempfile.gettempdir()
+    compute = detect_compute(ecs, gpu)
     return {
-        "compute": detect_compute(ecs, gpu),
+        "compute": compute,
         "hostname": socket.gethostname(),
         "os": f"{uname.system} {uname.release}",
         "machine": uname.machine,
         "python": sys.version.split()[0],
-        **resources(ecs),
+        **resources(ecs, compute["type"]),
         "gpu": gpu,
         "disk": disk([os.environ.get("INPUT_DIR", ""), os.environ.get("OUTPUT_DIR", ""),
                       tmpdir, "/data", "/tmp", os.getcwd()]),
@@ -546,6 +570,22 @@ def sleep(seconds: int) -> None:
 
 # --- report ------------------------------------------------------------------
 
+def cpu_line(cpu: dict) -> str:
+    value = f"**{cpu['effectiveVcpu']} vCPU**" if cpu["effectiveVcpu"] is not None else "**unknown**"
+    details = [f"{cpu['visibleCores']} cores visible"]
+    if "taskVcpu" in cpu:
+        details += [f"task {cpu['taskVcpu'] or '-'}", f"cgroup quota {cpu['cgroupQuotaCores'] or 'none'}"]
+    return f"- CPU: {value} ({cpu['limitedBy']}); {', '.join(details)}"
+
+
+def memory_line(memory: dict) -> str:
+    value = f"**{memory['effectiveMiB']} MiB**" if memory["effectiveMiB"] is not None else "**unknown**"
+    details = [f"host {memory['hostTotalMiB'] or '-'} MiB"]
+    if "taskLimitMiB" in memory:
+        details += [f"task {memory['taskLimitMiB'] or '-'} MiB", f"cgroup limit {memory['cgroupLimitMiB'] or 'none'}"]
+    return f"- Memory: {value} ({memory['limitedBy']}); {', '.join(details)}"
+
+
 def markdown(report: dict) -> str:
     s, p = report["system"], report["process"]
     lines = [
@@ -555,12 +595,8 @@ def markdown(report: dict) -> str:
         f"- Compute: **{s['compute']['type']}** ({'; '.join(s['compute']['reasons'])})",
         f"- Run `{os.environ.get('EXECUTION_RUN_ID', '-')}` on node `{os.environ.get('COMPUTE_NODE_ID', '-')}`, "
         f"environment `{os.environ.get('ENVIRONMENT', '-')}`, mode `{os.environ.get('DEPLOYMENT_MODE', '-')}`",
-        f"- CPU: **{s['cpu']['effectiveVcpu']} vCPU** ({s['cpu']['limitedBy']}); "
-        f"{s['cpu']['visibleCores']} cores visible, task {s['cpu']['taskVcpu'] or '-'}, "
-        f"cgroup quota {s['cpu']['cgroupQuotaCores'] or 'none'}",
-        f"- Memory: **{s['memory']['effectiveMiB']} MiB** ({s['memory']['limitedBy']}); "
-        f"host {s['memory']['hostTotalMiB'] or '-'} MiB, task {s['memory']['taskLimitMiB'] or '-'} MiB, "
-        f"cgroup limit {s['memory']['cgroupLimitMiB'] or 'none'}",
+        cpu_line(s["cpu"]),
+        memory_line(s["memory"]),
         f"- GPU: {', '.join(s['gpu'].get('gpus', [])) or 'none'}",
         f"- User {p['uid']}:{p['gid']} (passwd entry: {p['passwdEntry']}), cwd `{p['cwd']}`, "
         f"writable {json.dumps(p['writable'])}",
