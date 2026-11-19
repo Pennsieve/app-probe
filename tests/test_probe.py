@@ -129,6 +129,31 @@ class ProbeTest(unittest.TestCase):
         self.assertIn("- CPU: **unknown** (not visible on Lambda", markdown)
         self.assertIn("- Memory: **unknown** (not visible on Lambda", markdown)
 
+    def test_reports_staged_dataset_view(self):
+        inputs = os.path.join(tempfile.mkdtemp(), "input")
+        shutil.copytree(FIXTURES, inputs)
+        os.makedirs(os.path.join(inputs, ".pennsieve"))
+        crate = {"@graph": [
+            {"@id": "./", "@type": "Dataset", "identifier": "view-1", "name": "Run: files",
+             "version": "1", "views:lifecycle": "run", "views:entryCount": 1,
+             "isBasedOn": [{"@id": "#source-1"}]},
+            {"@id": "#source-1", "@type": "Dataset", "views:sourceType": "workspace",
+             "identifier": [{"@id": "#source-1-pennsieve"}]},
+            {"@id": "#source-1-pennsieve", "propertyID": "pennsieve", "value": "N:dataset:abc"},
+        ]}
+        with open(os.path.join(inputs, ".pennsieve", "view.json"), "w") as f:
+            json.dump(crate, f)
+        proc, out = run_probe({"INPUT_DIR": inputs})
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        with open(os.path.join(out, "report.json")) as f:
+            views = json.load(f)["inputs"]["views"]
+        self.assertEqual(len(views), 1)
+        self.assertEqual(views[0]["id"], "view-1")
+        self.assertEqual(views[0]["lifecycle"], "run")
+        self.assertEqual(views[0]["sources"], [{"type": "workspace", "dataset": "N:dataset:abc"}])
+        with open(os.path.join(out, "report.md")) as f:
+            self.assertIn("View `Run: files` `view-1` v1 (run, 1 entries) from workspace N:dataset:abc", f.read())
+
     def test_bad_parameters_fall_back_to_defaults(self):
         proc, _ = run_probe({"MODE": "bogus", "EXIT_CODE": "not-a-number"})
         self.assertEqual(proc.returncode, 0, proc.stderr)

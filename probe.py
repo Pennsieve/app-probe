@@ -477,8 +477,53 @@ def inputs(hash_max_mb: int) -> dict:
         "totalBytes": total,
         "files": files,
         "truncated": truncated,
+        "views": input_views(root),
         "note": "a port with placement: subfolder shows as its own top-level folder",
     }
+
+
+VIEW_CRATE = os.path.join(".pennsieve", "view.json")
+
+
+def input_views(root: str) -> list[dict]:
+    """The dataset views staged as inputs: each has its crate at .pennsieve/view.json in
+    its source's folder (INPUT_DIR itself, or a folder of it)."""
+    candidates = [os.path.join(root, VIEW_CRATE)]
+    try:
+        candidates += [os.path.join(root, e, VIEW_CRATE) for e in sorted(os.listdir(root))
+                       if e != ".pennsieve" and os.path.isdir(os.path.join(root, e))]
+    except OSError:
+        pass
+    return [view_summary(root, path) for path in candidates if os.path.isfile(path)]
+
+
+def view_summary(root: str, path: str) -> dict:
+    summary = {"crate": os.path.relpath(path, root)}
+    try:
+        with open(path) as f:
+            graph = json.load(f).get("@graph", [])
+    except (OSError, ValueError, AttributeError) as e:
+        summary["error"] = str(e)
+        return summary
+    by_id = {node.get("@id"): node for node in graph if isinstance(node, dict)}
+    view = by_id.get("./", {})
+    sources = []
+    for ref in view.get("isBasedOn") or []:
+        source = by_id.get(ref.get("@id"), {})
+        ids = {by_id.get(i.get("@id"), {}).get("propertyID"): by_id.get(i.get("@id"), {}).get("value")
+               for i in source.get("identifier") or []}
+        sources.append({"type": source.get("views:sourceType"), "dataset": ids.get("pennsieve")})
+    summary.update({
+        "id": view.get("identifier"),
+        "name": view.get("name"),
+        "version": view.get("version"),
+        "lifecycle": view.get("views:lifecycle"),
+        "accessScope": view.get("views:accessScope"),
+        "entryCount": view.get("views:entryCount"),
+        "created": view.get("dateCreated"),
+        "sources": sources,
+    })
+    return summary
 
 
 # --- network -----------------------------------------------------------------
@@ -620,6 +665,13 @@ def markdown(report: dict) -> str:
         lines += [f"- `{f['path']}` {f.get('bytes', '?')} B {f.get('sha256', '')[:12]}" for f in i["files"][:50]]
         if len(i["files"]) > 50 or i["truncated"]:
             lines.append("- ... (full list in report.json)")
+        for v in i.get("views", []):
+            if "error" in v:
+                lines.append(f"- View crate `{v['crate']}` could not be read: {v['error']}")
+                continue
+            sources = ", ".join(f"{s['type']} {s['dataset']}" for s in v["sources"]) or "-"
+            lines.append(f"- View `{v['name']}` `{v['id']}` v{v['version']} ({v['lifecycle']}, "
+                         f"{v['entryCount']} entries) from {sources}; crate `{v['crate']}`")
     else:
         lines.append(f"No input directory ({i.get('inputDir')}).")
     lines += ["", "## Network", ""]

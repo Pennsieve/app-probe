@@ -7,6 +7,7 @@ abstract: >-
 type: software
 authors:
   - name: Pennsieve
+repository-code: https://github.com/pennsieve-apps/app-probe
 license: Apache-2.0
 keywords:
   - diagnostics

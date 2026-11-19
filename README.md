@@ -30,7 +30,8 @@ which pins the exact build, and by the release tag when the image reference carr
 - **Process:** uid and gid, whether a passwd entry exists, working directory, and which
   folders are writable.
 - **Inputs:** every file under `INPUT_DIR` with its size and SHA-256 (bounded), and the top
-  level, which shows where each port was placed.
+  level, which shows where each port was placed. A dataset view staged as input (its
+  `.pennsieve/view.json`) is summarised: id, name, lifecycle, entry count and source.
 - **Network:** DNS and HTTPS reach to the Pennsieve API, an AWS endpoint and the public
   internet, and the LLM proxy when present.
 - **Environment:** the names of all environment variables.
