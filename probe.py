@@ -497,22 +497,42 @@ def input_views(root: str) -> list[dict]:
     return [view_summary(root, path) for path in candidates if os.path.isfile(path)]
 
 
+def as_list(value) -> list:
+    """An RO-Crate property holds one value or a list of them."""
+    if value is None:
+        return []
+    return value if isinstance(value, list) else [value]
+
+
+def source_summary(by_id: dict, ref) -> dict:
+    """A view source: an {"@id"} reference to a Dataset node. Its identifier is a plain
+    value, or references to PropertyValue nodes ({propertyID, value})."""
+    source = by_id.get(ref.get("@id"), {}) if isinstance(ref, dict) else {}
+    dataset, identifiers = None, []
+    for ident in as_list(source.get("identifier")):
+        node = by_id.get(ident.get("@id")) if isinstance(ident, dict) else None
+        if isinstance(node, dict):
+            if node.get("propertyID") == "pennsieve":
+                dataset = node.get("value")
+            identifiers.append({"propertyID": node.get("propertyID"), "value": node.get("value")})
+        else:
+            identifiers.append(ident)
+    return {"type": source.get("views:sourceType"), "name": source.get("name"),
+            "dataset": dataset, "identifiers": identifiers}
+
+
 def view_summary(root: str, path: str) -> dict:
     summary = {"crate": os.path.relpath(path, root)}
     try:
         with open(path) as f:
             graph = json.load(f).get("@graph", [])
-    except (OSError, ValueError, AttributeError) as e:
-        summary["error"] = str(e)
+        by_id = {node.get("@id"): node for node in as_list(graph) if isinstance(node, dict)}
+        view = by_id.get("./", {})
+        sources = [source_summary(by_id, ref) for ref in as_list(view.get("isBasedOn"))]
+    # The summary only describes the input; a crate of an unexpected shape must not fail the run.
+    except Exception as e:  # noqa: BLE001
+        summary["error"] = f"{type(e).__name__}: {e}"
         return summary
-    by_id = {node.get("@id"): node for node in graph if isinstance(node, dict)}
-    view = by_id.get("./", {})
-    sources = []
-    for ref in view.get("isBasedOn") or []:
-        source = by_id.get(ref.get("@id"), {})
-        ids = {by_id.get(i.get("@id"), {}).get("propertyID"): by_id.get(i.get("@id"), {}).get("value")
-               for i in source.get("identifier") or []}
-        sources.append({"type": source.get("views:sourceType"), "dataset": ids.get("pennsieve")})
     summary.update({
         "id": view.get("identifier"),
         "name": view.get("name"),
@@ -669,7 +689,8 @@ def markdown(report: dict) -> str:
             if "error" in v:
                 lines.append(f"- View crate `{v['crate']}` could not be read: {v['error']}")
                 continue
-            sources = ", ".join(f"{s['type']} {s['dataset']}" for s in v["sources"]) or "-"
+            sources = ", ".join(f"{s['type']} {s['dataset'] or s['name'] or s['identifiers']}"
+                                for s in v["sources"]) or "-"
             lines.append(f"- View `{v['name']}` `{v['id']}` v{v['version']} ({v['lifecycle']}, "
                          f"{v['entryCount']} entries) from {sources}; crate `{v['crate']}`")
     else:

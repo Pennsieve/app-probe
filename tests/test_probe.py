@@ -150,9 +150,37 @@ class ProbeTest(unittest.TestCase):
         self.assertEqual(len(views), 1)
         self.assertEqual(views[0]["id"], "view-1")
         self.assertEqual(views[0]["lifecycle"], "run")
-        self.assertEqual(views[0]["sources"], [{"type": "workspace", "dataset": "N:dataset:abc"}])
+        self.assertEqual(views[0]["sources"][0]["type"], "workspace")
+        self.assertEqual(views[0]["sources"][0]["dataset"], "N:dataset:abc")
         with open(os.path.join(out, "report.md")) as f:
             self.assertIn("View `Run: files` `view-1` v1 (run, 1 entries) from workspace N:dataset:abc", f.read())
+
+    def test_view_crate_shapes_never_fail_the_run(self):
+        sys.path.insert(0, ROOT)
+        try:
+            import probe
+        finally:
+            sys.path.remove(ROOT)
+        root = tempfile.mkdtemp()
+        path = os.path.join(root, "view.json")
+        shapes = {
+            # identifier as a plain string, isBasedOn as a single reference
+            "plain values": {"@graph": [
+                {"@id": "./", "identifier": "v", "isBasedOn": {"@id": "#s"}},
+                {"@id": "#s", "views:sourceType": "dataset", "identifier": "N:dataset:xyz"}]},
+            "not a crate": ["unexpected"],
+            "graph not a list": {"@graph": "nope"},
+        }
+        for label, crate in shapes.items():
+            with self.subTest(label):
+                with open(path, "w") as f:
+                    json.dump(crate, f)
+                summary = probe.view_summary(root, path)
+                self.assertEqual(summary["crate"], "view.json")
+        with open(path, "w") as f:
+            json.dump(shapes["plain values"], f)
+        source = probe.view_summary(root, path)["sources"][0]
+        self.assertEqual(source["identifiers"], ["N:dataset:xyz"])
 
     def test_bad_parameters_fall_back_to_defaults(self):
         proc, _ = run_probe({"MODE": "bogus", "EXIT_CODE": "not-a-number"})
