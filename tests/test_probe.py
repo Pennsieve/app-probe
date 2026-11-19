@@ -129,7 +129,22 @@ class ProbeTest(unittest.TestCase):
         self.assertIn("- CPU: **unknown** (not visible on Lambda", markdown)
         self.assertIn("- Memory: **unknown** (not visible on Lambda", markdown)
 
-    def test_reports_staged_dataset_view(self):
+    def import_probe(self):
+        sys.path.insert(0, ROOT)
+        try:
+            import probe
+        finally:
+            sys.path.remove(ROOT)
+        return probe
+
+    def write_crate(self, crate):
+        root = tempfile.mkdtemp()
+        with open(os.path.join(root, "view.json"), "w") as f:
+            json.dump(crate, f)
+        return self.import_probe().view_summary(root, os.path.join(root, "view.json"))
+
+    def test_reports_staged_workspace_view(self):
+        # The shape views-service writes for a workspace dataset (internal/crate/crate.go).
         inputs = os.path.join(tempfile.mkdtemp(), "input")
         shutil.copytree(FIXTURES, inputs)
         os.makedirs(os.path.join(inputs, ".pennsieve"))
@@ -137,9 +152,10 @@ class ProbeTest(unittest.TestCase):
             {"@id": "./", "@type": "Dataset", "identifier": "view-1", "name": "Run: files",
              "version": "1", "views:lifecycle": "run", "views:entryCount": 1,
              "isBasedOn": [{"@id": "#source-1"}]},
-            {"@id": "#source-1", "@type": "Dataset", "views:sourceType": "workspace",
-             "identifier": [{"@id": "#source-1-pennsieve"}]},
+            {"@id": "#source-1", "@type": "Dataset", "name": "N:dataset:abc", "views:sourceType": "workspace",
+             "identifier": [{"@id": "#source-1-pennsieve"}, {"@id": "#source-1-pennsieve-organization"}]},
             {"@id": "#source-1-pennsieve", "propertyID": "pennsieve", "value": "N:dataset:abc"},
+            {"@id": "#source-1-pennsieve-organization", "propertyID": "pennsieve-organization", "value": "N:organization:o"},
         ]}
         with open(os.path.join(inputs, ".pennsieve", "view.json"), "w") as f:
             json.dump(crate, f)
@@ -148,39 +164,41 @@ class ProbeTest(unittest.TestCase):
         with open(os.path.join(out, "report.json")) as f:
             views = json.load(f)["inputs"]["views"]
         self.assertEqual(len(views), 1)
-        self.assertEqual(views[0]["id"], "view-1")
         self.assertEqual(views[0]["lifecycle"], "run")
-        self.assertEqual(views[0]["sources"][0]["type"], "workspace")
-        self.assertEqual(views[0]["sources"][0]["dataset"], "N:dataset:abc")
+        source = views[0]["sources"][0]
+        self.assertEqual(source["ids"], {"pennsieve": "N:dataset:abc", "pennsieve-organization": "N:organization:o"})
+        self.assertEqual(source["unexpected"], [])
         with open(os.path.join(out, "report.md")) as f:
-            self.assertIn("View `Run: files` `view-1` v1 (run, 1 entries) from workspace N:dataset:abc", f.read())
+            self.assertIn('View `Run: files` `view-1` v1 (run, 1 entries) from "N:dataset:abc" '
+                          "(pennsieve N:dataset:abc, pennsieve-organization N:organization:o, type workspace)", f.read())
 
-    def test_view_crate_shapes_never_fail_the_run(self):
-        sys.path.insert(0, ROOT)
-        try:
-            import probe
-        finally:
-            sys.path.remove(ROOT)
-        root = tempfile.mkdtemp()
-        path = os.path.join(root, "view.json")
-        shapes = {
-            # identifier as a plain string, isBasedOn as a single reference
-            "plain values": {"@graph": [
-                {"@id": "./", "identifier": "v", "isBasedOn": {"@id": "#s"}},
-                {"@id": "#s", "views:sourceType": "dataset", "identifier": "N:dataset:xyz"}]},
-            "not a crate": ["unexpected"],
-            "graph not a list": {"@graph": "nope"},
-        }
-        for label, crate in shapes.items():
-            with self.subTest(label):
-                with open(path, "w") as f:
-                    json.dump(crate, f)
-                summary = probe.view_summary(root, path)
-                self.assertEqual(summary["crate"], "view.json")
-        with open(path, "w") as f:
-            json.dump(shapes["plain values"], f)
-        source = probe.view_summary(root, path)["sources"][0]
-        self.assertEqual(source["identifiers"], ["N:dataset:xyz"])
+    def test_published_dataset_source(self):
+        # The shape views-service writes for a Discover dataset: a DOI string and a reference.
+        summary = self.write_crate({"@graph": [
+            {"@id": "./", "isBasedOn": [{"@id": "https://doi.org/10.21397/qswm-ysfc"}]},
+            {"@id": "https://doi.org/10.21397/qswm-ysfc", "name": "No More STRIDES buckets",
+             "alternateName": "dataset-5363-v1",
+             "identifier": ["https://doi.org/10.21397/qswm-ysfc", {"@id": "#source-1-pennsieve-discover"}]},
+            {"@id": "#source-1-pennsieve-discover", "propertyID": "pennsieve-discover", "value": "5363"},
+        ]})
+        source = summary["sources"][0]
+        self.assertEqual(source["doi"], "10.21397/qswm-ysfc")
+        self.assertEqual(source["ids"], {"pennsieve-discover": "5363"})
+        self.assertEqual(self.import_probe().source_label(source),
+                         '"No More STRIDES buckets" (pennsieve-discover 5363, doi:10.21397/qswm-ysfc, '
+                         "alternateName dataset-5363-v1)")
+
+    def test_unexpected_crates_are_reported_not_fatal(self):
+        # views-service is still changing: unknown shapes are recorded, never raised.
+        source = self.write_crate({"@graph": [
+            {"@id": "./", "isBasedOn": {"@id": "#s"}},
+            {"@id": "#s", "name": "s", "identifier": "N:dataset:xyz"},
+        ]})["sources"][0]
+        self.assertEqual(len(source["unexpected"]), 2)  # not a list; not a DOI or a reference
+        self.assertIn("2 unexpected (see report.json)", self.import_probe().source_label(source))
+        for crate in (["not a crate"], {"@graph": "nope"}, {"@graph": []}):
+            with self.subTest(crate=crate):
+                self.assertIn("not a view crate as expected", self.write_crate(crate)["error"])
 
     def test_bad_parameters_fall_back_to_defaults(self):
         proc, _ = run_probe({"MODE": "bogus", "EXIT_CODE": "not-a-number"})

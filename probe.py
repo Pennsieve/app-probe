@@ -497,28 +497,34 @@ def input_views(root: str) -> list[dict]:
     return [view_summary(root, path) for path in candidates if os.path.isfile(path)]
 
 
-def as_list(value) -> list:
-    """An RO-Crate property holds one value or a list of them."""
-    if value is None:
-        return []
-    return value if isinstance(value, list) else [value]
+# A view's crate is written by views-service (internal/crate/crate.go, Crate; read back by
+# Summarize). The root "./" isBasedOn its sources, each a node with a name, optional
+# views:sourceType and alternateName, and an identifier list holding at most one DOI as
+# "https://doi.org/<doi>" and {"@id"} references to PropertyValue nodes {propertyID, value}.
+# views-service is still changing, so anything else is recorded under "unexpected" rather
+# than failing: the probe only describes its input.
+DOI_PREFIX = "https://doi.org/"
 
 
 def source_summary(by_id: dict, ref) -> dict:
-    """A view source: an {"@id"} reference to a Dataset node. Its identifier is a plain
-    value, or references to PropertyValue nodes ({propertyID, value})."""
-    source = by_id.get(ref.get("@id"), {}) if isinstance(ref, dict) else {}
-    dataset, identifiers = None, []
-    for ident in as_list(source.get("identifier")):
+    source = by_id.get(ref.get("@id")) if isinstance(ref, dict) else None
+    if not isinstance(source, dict):
+        return {"unexpected": [f"isBasedOn entry {ref!r} names no node"]}
+    summary = {"name": source.get("name"), "type": source.get("views:sourceType"),
+               "alternateName": source.get("alternateName"), "doi": None, "ids": {}, "unexpected": []}
+    identifiers = source.get("identifier") or []
+    if not isinstance(identifiers, list):
+        summary["unexpected"].append(f"identifier is not a list: {identifiers!r}")
+        identifiers = [identifiers]
+    for ident in identifiers:
         node = by_id.get(ident.get("@id")) if isinstance(ident, dict) else None
-        if isinstance(node, dict):
-            if node.get("propertyID") == "pennsieve":
-                dataset = node.get("value")
-            identifiers.append({"propertyID": node.get("propertyID"), "value": node.get("value")})
+        if isinstance(ident, str) and ident.startswith(DOI_PREFIX):
+            summary["doi"] = ident[len(DOI_PREFIX):]
+        elif isinstance(node, dict) and "propertyID" in node:
+            summary["ids"][str(node["propertyID"])] = node.get("value")
         else:
-            identifiers.append(ident)
-    return {"type": source.get("views:sourceType"), "name": source.get("name"),
-            "dataset": dataset, "identifiers": identifiers}
+            summary["unexpected"].append(f"identifier {ident!r}")
+    return summary
 
 
 def view_summary(root: str, path: str) -> dict:
@@ -526,12 +532,12 @@ def view_summary(root: str, path: str) -> dict:
     try:
         with open(path) as f:
             graph = json.load(f).get("@graph", [])
-        by_id = {node.get("@id"): node for node in as_list(graph) if isinstance(node, dict)}
-        view = by_id.get("./", {})
-        sources = [source_summary(by_id, ref) for ref in as_list(view.get("isBasedOn"))]
-    # The summary only describes the input; a crate of an unexpected shape must not fail the run.
-    except Exception as e:  # noqa: BLE001
-        summary["error"] = f"{type(e).__name__}: {e}"
+        by_id = {node.get("@id"): node for node in graph if isinstance(node, dict)}
+        view = by_id["./"]
+        based_on = view.get("isBasedOn") or []
+        sources = [source_summary(by_id, ref) for ref in (based_on if isinstance(based_on, list) else [based_on])]
+    except Exception as e:  # noqa: BLE001 - see the note above DOI_PREFIX
+        summary["error"] = f"not a view crate as expected: {type(e).__name__}: {e}"
         return summary
     summary.update({
         "id": view.get("identifier"),
@@ -635,6 +641,19 @@ def sleep(seconds: int) -> None:
 
 # --- report ------------------------------------------------------------------
 
+def source_label(source: dict) -> str:
+    """'"No More STRIDES buckets" (pennsieve-discover 5363, doi:10.21397/qswm-ysfc)'."""
+    details = [f"{k} {v}" for k, v in source.get("ids", {}).items()]
+    if source.get("doi"):
+        details.append(f"doi:{source['doi']}")
+    for key in ("type", "alternateName"):
+        if source.get(key):
+            details.append(f"{key} {source[key]}")
+    if source.get("unexpected"):
+        details.append(f"{len(source['unexpected'])} unexpected (see report.json)")
+    return f'"{source.get("name") or "unnamed"}" ({", ".join(details) or "no identifiers"})'
+
+
 def cpu_line(cpu: dict) -> str:
     value = f"**{cpu['effectiveVcpu']} vCPU**" if cpu["effectiveVcpu"] is not None else "**unknown**"
     details = [f"{cpu['visibleCores']} cores visible"]
@@ -689,8 +708,7 @@ def markdown(report: dict) -> str:
             if "error" in v:
                 lines.append(f"- View crate `{v['crate']}` could not be read: {v['error']}")
                 continue
-            sources = ", ".join(f"{s['type']} {s['dataset'] or s['name'] or s['identifiers']}"
-                                for s in v["sources"]) or "-"
+            sources = "; ".join(source_label(s) for s in v["sources"]) or "-"
             lines.append(f"- View `{v['name']}` `{v['id']}` v{v['version']} ({v['lifecycle']}, "
                          f"{v['entryCount']} entries) from {sources}; crate `{v['crate']}`")
     else:
