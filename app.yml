@@ -17,7 +17,6 @@ application:
 runtime:
   cpu: 512
   memory: 1024
-  timeoutSeconds: 7200
   computeTypes: [standard]
 parameters:
   - name: MODE
