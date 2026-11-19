@@ -23,7 +23,8 @@ which pins the exact build, and by the release tag when the image reference carr
   and how that was decided.
 - **ECS task:** task ARN, family, launch type, availability zone, the other containers in
   the task, and the image, **image digest** and release tag the step ran.
-- **Resources:** CPU count and cgroup quota, memory limit, GPU (`nvidia-smi`), free disk on
+- **Resources:** the CPU and memory the step actually gets (the smallest of the host's,
+  the cgroup's and the ECS task's limits), GPU (`nvidia-smi`), free disk on
   `INPUT_DIR`, `OUTPUT_DIR`, `TMPDIR` and `/data`.
 - **Process:** uid and gid, whether a passwd entry exists, working directory, and which
   folders are writable.

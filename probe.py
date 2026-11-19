@@ -227,24 +227,73 @@ def detect_compute(ecs: dict | None, gpu: dict) -> dict:
 
 
 def cgroup_limits() -> dict:
-    limits = {}
+    """The container's own cgroup limits. None means no limit at the container level;
+    on Fargate the task's limits are enforced by a parent cgroup the container can't see."""
+    cpu_cores = None
     cpu_max = read_text("/sys/fs/cgroup/cpu.max")  # cgroup v2: "<quota> <period>"
     if cpu_max:
         quota, _, period = cpu_max.partition(" ")
-        limits["cpuMax"] = cpu_max
         if quota != "max" and period:
-            limits["cpuQuotaCores"] = round(int(quota) / int(period), 2)
+            cpu_cores = round(int(quota) / int(period), 2)
     else:  # cgroup v1
         quota = read_text("/sys/fs/cgroup/cpu/cpu.cfs_quota_us")
         period = read_text("/sys/fs/cgroup/cpu/cpu.cfs_period_us")
         if quota and period and int(quota) > 0:
-            limits["cpuQuotaCores"] = round(int(quota) / int(period), 2)
+            cpu_cores = round(int(quota) / int(period), 2)
+    memory_mib = None
     memory = read_text("/sys/fs/cgroup/memory.max") or read_text("/sys/fs/cgroup/memory/memory.limit_in_bytes")
-    if memory:
-        limits["memoryLimitBytes"] = memory if memory == "max" else int(memory)
-        if memory != "max" and int(memory) < 1 << 60:
-            limits["memoryLimitMiB"] = int(memory) // (1024 * 1024)
-    return limits
+    # "max" (v2) or a value near 2**63 (v1) means unlimited.
+    if memory and memory != "max" and int(memory) < 1 << 60:
+        memory_mib = int(memory) // (1024 * 1024)
+    return {"cpuQuotaCores": cpu_cores, "memoryLimitMiB": memory_mib}
+
+
+def smallest(candidates: dict) -> tuple:
+    """The smallest known limit and its name, ignoring unknown (None) ones."""
+    known = {name: value for name, value in candidates.items() if value is not None}
+    if not known:
+        return None, None
+    name = min(known, key=known.get)
+    return known[name], name
+
+
+def resources(ecs: dict | None) -> dict:
+    """CPU and memory as the step actually gets them. The host's figures (cores visible,
+    MemTotal) describe the VM, not the step, so the effective value is the smallest limit."""
+    cgroup = cgroup_limits()
+    ecs = ecs or {}
+    task = ecs.get("taskLimits") or {}
+    container = (ecs.get("container") or {}).get("limits") or {}
+    try:
+        affinity = len(os.sched_getaffinity(0))
+    except AttributeError:
+        affinity = None
+    cpu = {
+        "visibleCores": os.cpu_count(),
+        "affinityCores": affinity,
+        "cgroupQuotaCores": cgroup["cpuQuotaCores"],
+        "taskVcpu": task.get("CPU"),
+        # ECS container CPU units are a relative weight (1024 = 1 vCPU), not a cap.
+        "containerCpuUnits": container.get("CPU"),
+    }
+    cpu["effectiveVcpu"], cpu["limitedBy"] = smallest({
+        "visible cores": affinity or os.cpu_count(),
+        "cgroup quota": cgroup["cpuQuotaCores"],
+        "task limit": task.get("CPU"),
+    })
+    memory = {
+        "hostTotalMiB": mem_total_mib(),
+        "cgroupLimitMiB": cgroup["memoryLimitMiB"],
+        "taskLimitMiB": task.get("Memory"),
+        "containerLimitMiB": container.get("Memory"),
+    }
+    memory["effectiveMiB"], memory["limitedBy"] = smallest({
+        "host total": memory["hostTotalMiB"],
+        "cgroup limit": memory["cgroupLimitMiB"],
+        "task limit": memory["taskLimitMiB"],
+        "container limit": memory["containerLimitMiB"],
+    })
+    return {"cpu": cpu, "memory": memory}
 
 
 def mem_total_mib() -> int | None:
@@ -292,10 +341,6 @@ def disk(paths: list[str]) -> list[dict]:
 
 
 def system(ecs: dict | None) -> dict:
-    try:
-        affinity = len(os.sched_getaffinity(0))
-    except AttributeError:
-        affinity = None
     uname = platform.uname()
     gpu = gpu_info()
     tmpdir = tempfile.gettempdir()
@@ -305,10 +350,7 @@ def system(ecs: dict | None) -> dict:
         "os": f"{uname.system} {uname.release}",
         "machine": uname.machine,
         "python": sys.version.split()[0],
-        "cpuCount": os.cpu_count(),
-        "cpuAffinity": affinity,
-        "cgroup": cgroup_limits(),
-        "memTotalMiB": mem_total_mib(),
+        **resources(ecs),
         "gpu": gpu,
         "disk": disk([os.environ.get("INPUT_DIR", ""), os.environ.get("OUTPUT_DIR", ""),
                       tmpdir, "/data", "/tmp", os.getcwd()]),
@@ -513,8 +555,12 @@ def markdown(report: dict) -> str:
         f"- Compute: **{s['compute']['type']}** ({'; '.join(s['compute']['reasons'])})",
         f"- Run `{os.environ.get('EXECUTION_RUN_ID', '-')}` on node `{os.environ.get('COMPUTE_NODE_ID', '-')}`, "
         f"environment `{os.environ.get('ENVIRONMENT', '-')}`, mode `{os.environ.get('DEPLOYMENT_MODE', '-')}`",
-        f"- CPUs {s['cpuCount']} (affinity {s['cpuAffinity']}), cgroup {json.dumps(s['cgroup'])}, "
-        f"memory {s['memTotalMiB']} MiB total",
+        f"- CPU: **{s['cpu']['effectiveVcpu']} vCPU** ({s['cpu']['limitedBy']}); "
+        f"{s['cpu']['visibleCores']} cores visible, task {s['cpu']['taskVcpu'] or '-'}, "
+        f"cgroup quota {s['cpu']['cgroupQuotaCores'] or 'none'}",
+        f"- Memory: **{s['memory']['effectiveMiB']} MiB** ({s['memory']['limitedBy']}); "
+        f"host {s['memory']['hostTotalMiB'] or '-'} MiB, task {s['memory']['taskLimitMiB'] or '-'} MiB, "
+        f"cgroup limit {s['memory']['cgroupLimitMiB'] or 'none'}",
         f"- GPU: {', '.join(s['gpu'].get('gpus', [])) or 'none'}",
         f"- User {p['uid']}:{p['gid']} (passwd entry: {p['passwdEntry']}), cwd `{p['cwd']}`, "
         f"writable {json.dumps(p['writable'])}",

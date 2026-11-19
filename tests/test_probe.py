@@ -81,6 +81,21 @@ class ProbeTest(unittest.TestCase):
         self.assertIsNone(probe.release_tag("python:3.12-slim"))
         self.assertIsNone(probe.release_tag(None))
 
+    def test_resources_use_the_smallest_limit(self):
+        sys.path.insert(0, ROOT)
+        try:
+            import probe
+        finally:
+            sys.path.remove(ROOT)
+        ecs = {"taskLimits": {"CPU": 0.5, "Memory": 1024}, "container": {"limits": {"CPU": 2}}}
+        r = probe.resources(ecs)
+        self.assertEqual(r["cpu"]["effectiveVcpu"], 0.5)
+        self.assertEqual(r["cpu"]["limitedBy"], "task limit")
+        self.assertEqual(r["cpu"]["containerCpuUnits"], 2)
+        self.assertEqual(r["memory"]["effectiveMiB"], 1024)
+        self.assertEqual(r["memory"]["limitedBy"], "task limit")
+        self.assertEqual(probe.smallest({"a": None, "b": None}), (None, None))
+
     def test_bad_parameters_fall_back_to_defaults(self):
         proc, _ = run_probe({"MODE": "bogus", "EXIT_CODE": "not-a-number"})
         self.assertEqual(proc.returncode, 0, proc.stderr)
