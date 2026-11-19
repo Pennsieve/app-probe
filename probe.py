@@ -642,7 +642,10 @@ def sleep(seconds: int) -> None:
 # --- report ------------------------------------------------------------------
 
 def source_label(source: dict) -> str:
-    """'"No More STRIDES buckets" (pennsieve-discover 5363, doi:10.21397/qswm-ysfc)'."""
+    """One line describing a view source for report.md: its name, then its identifiers,
+    type, alternateName and any unexpected parts, e.g.
+    "No More STRIDES buckets" (pennsieve-discover 5363, doi:10.21397/qswm-ysfc)
+    """
     details = [f"{k} {v}" for k, v in source.get("ids", {}).items()]
     if source.get("doi"):
         details.append(f"doi:{source['doi']}")
