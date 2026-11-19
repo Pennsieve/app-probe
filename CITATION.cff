@@ -1,0 +1,14 @@
+cff-version: 1.2.0
+message: If you use this software, please cite it as below.
+title: App Probe
+abstract: >-
+  A diagnostic Pennsieve app that reports what a workflow step sees at runtime, and can act
+  as a pass-through step, for testing and debugging Pennsieve compute.
+type: software
+authors:
+  - name: Pennsieve
+license: Apache-2.0
+keywords:
+  - diagnostics
+  - testing
+  - pennsieve

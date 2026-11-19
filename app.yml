@@ -1,0 +1,109 @@
+# yaml-language-server: $schema=https://schemas.pennsieve.io/app-manifest/v1.json
+schemaVersion: "1.0"
+application:
+  name: App Probe
+  description: >-
+    A diagnostic app for testing and debugging Pennsieve compute. Reports what a step sees at
+    runtime (compute type, ECS task and image digest, CPU, memory, disk and GPU, user and
+    writable folders, the input layout, network reach for the node's deployment mode, and
+    environment variable names) to report.json and report.md. In echo mode it copies its
+    inputs to its outputs unchanged, as a pass-through step. Parameters make it sleep, log,
+    write filler data or exit with a chosen code, to test the platform around it.
+  type: processor
+  tags:
+    - diagnostics
+    - testing
+    - utility
+runtime:
+  cpu: 512
+  memory: 1024
+  timeoutSeconds: 7200
+  computeTypes: [standard]
+parameters:
+  - name: MODE
+    type: string
+    label: Mode
+    description: >-
+      inspect (default): write report.json and report.md to the output. echo: copy the inputs
+      to the output unchanged; the report goes to the log only.
+    defaultValue: inspect
+    validValues: [inspect, echo]
+  - name: SLEEP_SECONDS
+    type: integer
+    label: Sleep (s)
+    description: Sleep this long before finishing, logging every 30 s. For testing timeouts and cancelling runs.
+    defaultValue: 0
+    min: 0
+    max: 604800
+  - name: EXIT_CODE
+    type: integer
+    label: Exit code
+    description: Exit with this code after writing the outputs. Non-zero tests how a failed step is handled and shown.
+    defaultValue: 0
+    min: 0
+    max: 255
+  - name: LOG_LINES
+    type: integer
+    label: Extra log lines
+    description: Write this many numbered lines to the log. For testing log volume and display.
+    defaultValue: 0
+    min: 0
+    max: 10000000
+  - name: WRITE_MB
+    type: integer
+    label: Filler output (MB)
+    description: Also write a file of this many MB of random data to the output. For testing uploads and size limits.
+    defaultValue: 0
+    min: 0
+    max: 100000
+  - name: NETWORK_CHECKS
+    type: boolean
+    label: Network checks
+    description: Check DNS and HTTPS reach to the Pennsieve API, an AWS endpoint and the public internet (and the LLM proxy when present).
+    defaultValue: true
+  - name: HASH_MAX_MB
+    type: integer
+    label: Checksum files up to (MB)
+    description: SHA-256 input files up to this size (at most 200 files). 0 lists sizes only.
+    defaultValue: 64
+    min: 0
+inputs:
+  - name: files
+    description: Any files. Optional; the probe runs without inputs.
+    mediaTypes:
+      - application/octet-stream
+    placement: root
+    required: false
+outputs:
+  - name: results
+    description: >-
+      inspect: report.json and report.md. echo: a copy of the inputs. Either mode adds
+      app-probe-filler.bin when WRITE_MB is set.
+    mediaTypes:
+      - application/json
+      - text/markdown
+      - application/octet-stream
+review:
+  version: 1
+  inputs:
+    files:
+      files: ["tests/fixtures/**"]
+      filePaths: source
+variants:
+  - id: cpu
+    name: CPU
+    default: true
+    runtime:
+      computeTypes: [standard]
+  - id: gpu
+    name: GPU
+    description: Runs on a GPU node, to check the GPU, driver and GPU_TIER the step gets.
+    runtime:
+      computeTypes: [gpu]
+      memory: 4096
+  - id: llm
+    name: LLM proxy
+    description: Runs with the LLM governor proxy, to check the step can reach it (no model is called).
+    runtime:
+      computeTypes: [standard]
+      llm: true
